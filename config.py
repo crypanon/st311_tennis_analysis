@@ -70,7 +70,7 @@ DOUBLES_COURT_WIDTH_M = 10.97
 HALF_COURT_LENGTH_M = 11.89 # Approx distance from net to baseline
 
 # --- Linear Weighting Defaults (for Standard CNN1 Training) ---
-DEFAULT_LINEAR_N_FRAMES_WEIGHTING = 7 # Renamed
+DEFAULT_LINEAR_N_FRAMES_WEIGHTING = 9 # Renamed
 DEFAULT_LINEAR_WEIGHT_DECAY = 0.3   # Renamed
 
 # --- CNN1 Defaults ---
@@ -115,7 +115,7 @@ BEST_BAYESIAN_PARAMS = None
 
 # --- Joint Training Control ---
 DEFAULT_JOINT_LR = 1e-5
-DEFAULT_JOINT_BATCH_SIZE = 16
+DEFAULT_JOINT_BATCH_SIZE = 4
 DEFAULT_JOINT_TRAINING_PENALTY_WEIGHT = 0.1
 # Fixed length for the context window in JointPredictionDataset
 JOINT_DATASET_CONTEXT_FRAMES = 21 # Must be >= max(R1+R2+1). Needs to be odd.
@@ -128,3 +128,14 @@ HALF_COURT_LENGTH_M = 11.89
 # These will be populated after Bayesian optimization
 OPTIMIZED_R1_INT = None
 OPTIMIZED_R2_INT = None
+
+
+# --- CNN2 Defaults ---
+DEFAULT_N_FRAMES_SEQUENCE_CNN2 = 7
+DEFAULT_CNN2_BATCH_SIZE = 16
+DEFAULT_CNN2_LR = 5e-5
+DEFAULT_CNN2_INPUT_CHANNELS = DEFAULT_N_FRAMES_SEQUENCE_CNN2 * 3
+# --- NEW: CNN2 Architecture Defaults ---
+DEFAULT_CNN2_CONV_FILTERS = (64, 128, 256, 512) # Filters per block (original structure)
+DEFAULT_CNN2_FC_SIZES = (1024, 512)          # Sizes of FC layers before output
+DEFAULT_CNN2_DROPOUT = 0.5                   # Dropout rate for CNN2 FC layers

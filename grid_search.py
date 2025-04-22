@@ -9,10 +9,11 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 import pandas as pd
 import json
+import math
 
 # Import project modules
 import config
-from models import HitFrameRegressorParam, HitFrameRegressorFinal, LandingPointCNN
+from models import HitFrameRegressorParam, HitFrameRegressorFinal, LandingPointCNNParam, LandingPointCNN
 from datasets import TennisFrameDataset, BallLandingDataset
 from training import train_model
 from data_utils import apply_linear_weighting_to_df, balance_and_split_data, get_sequences_for_cnn2, split_sequences
@@ -454,3 +455,119 @@ def run_cnn2_trainhp_search(final_cnn2_splits, best_seq_len, device):
     else:
         print("CNN2 Train HP search failed. Using defaults.")
         return config.DEFAULT_CNN2_LR, config.DEFAULT_CNN2_BATCH_SIZE
+
+# --- NEW: CNN2 Architecture Search ---
+def run_cnn2_arch_search(standard_cnn2_splits, standard_cnn2_seq_len, device):
+    """Performs grid search for CNN2 architecture."""
+    print("\n" + "="*30 + " CNN2 Architecture Search " + "="*30)
+    print(f"Epochs per trial: {config.GRID_SEARCH_TUNING_EPOCHS}")
+    print(f"Using fixed sequence length for search: {standard_cnn2_seq_len}")
+
+    # --- Define Architecture Options ---
+    # Example: Vary filters in the original 4 blocks
+    cnn2_filter_options = [
+        (64, 128, 256, 512), # Original
+        (32, 64, 128, 256),  # Slimmer
+        (64, 128, 256),      # Shallower (3 blocks)
+        (128, 256, 512, 512),# Wider later
+    ]
+    # Example: Vary FC layers
+    cnn2_fc_size_options = [
+        (1024, 512),         # Original
+        (512, 256),          # Smaller FC
+        (1024,),             # Single large FC layer
+    ]
+    # Keep dropout fixed for this search
+    cnn2_dropout_options = [config.DEFAULT_CNN2_DROPOUT]
+
+    combinations = list(itertools.product(cnn2_filter_options, cnn2_fc_size_options, cnn2_dropout_options))
+    random.shuffle(combinations)
+    # Limit candidates if needed (can add a config param like CNN1)
+    # combinations = combinations[:MAX_CNN2_ARCH_CANDIDATES]
+    print(f"Testing {len(combinations)} CNN2 architecture combinations.")
+
+    # Use standard CNN2 splits and sequence length for this search
+    train_seq, val_seq, _ = standard_cnn2_splits
+    if not train_seq or not val_seq:
+        print("ERROR: Standard CNN2 data splits are empty. Cannot run arch search.")
+        return config.DEFAULT_CNN2_CONV_FILTERS, config.DEFAULT_CNN2_FC_SIZES, config.DEFAULT_CNN2_DROPOUT # Return defaults
+
+    # Create datasets ONCE using the standard sequence length
+    input_channels = standard_cnn2_seq_len * 3
+    train_ds = BallLandingDataset(train_seq, config.IMG_HEIGHT, config.IMG_WIDTH, standard_cnn2_seq_len, augment=False)
+    val_ds = BallLandingDataset(val_seq, config.IMG_HEIGHT, config.IMG_WIDTH, standard_cnn2_seq_len, augment=False)
+
+    # Use default/fixed CNN2 LR/BS for this architecture search
+    temp_lr = config.DEFAULT_CNN2_LR
+    temp_bs = config.DEFAULT_CNN2_BATCH_SIZE
+    temp_criterion = nn.MSELoss()
+
+    results = []
+    best_val_loss = float('inf')
+    best_params = None
+
+    for i, (conv_filters, fc_sizes, dropout) in enumerate(combinations):
+        print(f"\n--- CNN2 Arch Cand {i+1}/{len(combinations)}: Conv={conv_filters}, FC={fc_sizes}, Drop={dropout} ---")
+        gc.collect(); torch.cuda.empty_cache()
+
+        try:
+            # Instantiate PARAMETERIZED CNN2 model
+            model = LandingPointCNNParam(
+                input_channels=input_channels, # Fixed for search
+                conv_filters=conv_filters,
+                fc_sizes=fc_sizes,
+                dropout_rate=dropout
+            ).to(device)
+
+            # Create DataLoaders (batch size fixed for arch search for now)
+            train_loader = DataLoader(train_ds, batch_size=temp_bs, shuffle=True, num_workers=config.NUM_WORKERS, pin_memory=config.PIN_MEMORY, drop_last=True)
+            val_loader = DataLoader(val_ds, batch_size=temp_bs, shuffle=False, num_workers=config.NUM_WORKERS, pin_memory=config.PIN_MEMORY)
+            if len(train_loader) == 0 or len(val_loader) == 0: continue # Skip if BS too large
+
+            optimizer = optim.Adam(model.parameters(), lr=temp_lr)
+
+            val_loss = train_model(
+                model=model, model_name="CNN2 (Arch Tuning)", train_loader=train_loader, val_loader=val_loader,
+                criterion=temp_criterion, optimizer=optimizer, device=device, epochs=config.GRID_SEARCH_TUNING_EPOCHS,
+                is_tuning_run=True, early_stopping_patience=0
+            )
+
+            if not math.isfinite(val_loss): val_loss = float('inf') # Handle potential errors
+            results.append({'conv_filters': str(conv_filters), 'fc_sizes': str(fc_sizes), 'dropout': dropout, 'val_loss': val_loss})
+
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_params = {'conv_filters': conv_filters, 'fc_sizes': fc_sizes, 'dropout': dropout}
+                print(f"*** New best CNN2 arch val_loss: {best_val_loss:.6f} ***")
+
+        except Exception as e:
+            print(f"!!! ERROR training CNN2 arch candidate {i+1}: {e} !!!")
+            results.append({'conv_filters': str(conv_filters), 'fc_sizes': str(fc_sizes), 'dropout': dropout, 'val_loss': float('inf'), 'error': str(e)})
+        finally:
+             # Explicit cleanup
+             del model, optimizer, train_loader, val_loader
+             gc.collect(); torch.cuda.empty_cache()
+
+
+    # Save results and best params
+    results_path = os.path.join(config.PROJECT_OUTPUT_PATH, 'cnn2_architecture_search_results.csv')
+    best_params_path = os.path.join(config.PROJECT_OUTPUT_PATH, 'best_cnn2_architecture.json')
+
+    if results:
+        df_results = pd.DataFrame(results).sort_values('val_loss')
+        df_results.to_csv(results_path, index=False)
+        print(f"CNN2 Arch search results saved to: {results_path}")
+
+    if best_params:
+        print(f"\nBest CNN2 Architecture Found: {best_params} (Val Loss: {best_val_loss:.6f})")
+        # Save (convert tuples to lists for JSON)
+        best_params_save = best_params.copy()
+        best_params_save['conv_filters'] = list(best_params_save['conv_filters'])
+        best_params_save['fc_sizes'] = list(best_params_save['fc_sizes'])
+        with open(best_params_path, 'w') as f: json.dump(best_params_save, f, indent=4)
+        print(f"Best CNN2 arch params saved to: {best_params_path}")
+        # Return parameters needed for model instantiation
+        return best_params['conv_filters'], best_params['fc_sizes'], best_params['dropout']
+    else:
+        print("CNN2 Arch search failed to find a best model. Using defaults.")
+        return config.DEFAULT_CNN2_CONV_FILTERS, config.DEFAULT_CNN2_FC_SIZES, config.DEFAULT_CNN2_DROPOUT
