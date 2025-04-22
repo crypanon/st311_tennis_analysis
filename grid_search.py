@@ -15,7 +15,7 @@ import config
 from models import HitFrameRegressorParam, HitFrameRegressorFinal, LandingPointCNN
 from datasets import TennisFrameDataset, BallLandingDataset
 from training import train_model
-from data_utils import apply_weighting_to_df, balance_and_split_data, get_sequences_for_cnn2, split_sequences
+from data_utils import apply_linear_weighting_to_df, balance_and_split_data, get_sequences_for_cnn2, split_sequences
 
 def run_cnn1_arch_search(df_full, initial_splits, device):
     """Performs grid search for CNN1 architecture."""
@@ -138,7 +138,7 @@ def run_cnn1_dataprep_search(df_full, best_arch_params, device):
 
         try:
             # 1. Regenerate data with current params
-            current_df_processed = apply_weighting_to_df(df_full, n_frames, decay)
+            current_df_processed = apply_linear_weighting_to_df(df_full, n_frames, decay)
             current_splits = balance_and_split_data(current_df_processed, balance)
             _, train_p, train_t, val_p, val_t, _, _ = current_splits
 
@@ -200,7 +200,7 @@ def run_cnn1_dataprep_search(df_full, best_arch_params, device):
         print("WARNING: Falling back to initial data splits for subsequent steps.")
         initial_splits = balance_and_split_data(df_full, config.DEFAULT_BALANCE_RATIO) # Use weighted df_full? No, raw df_full
         # Re-run weighting/balancing with defaults
-        df_processed_default = apply_weighting_to_df(df_full, config.DEFAULT_N_FRAMES_WEIGHTING, config.DEFAULT_WEIGHT_DECAY)
+        df_processed_default = apply_linear_weighting_to_df(df_full, config.DEFAULT_N_FRAMES_WEIGHTING, config.DEFAULT_WEIGHT_DECAY)
         default_splits = balance_and_split_data(df_processed_default, config.DEFAULT_BALANCE_RATIO)
 
         return config.DEFAULT_N_FRAMES_WEIGHTING, config.DEFAULT_WEIGHT_DECAY, config.DEFAULT_BALANCE_RATIO, default_splits

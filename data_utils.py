@@ -6,9 +6,11 @@ import cv2
 import re
 from tqdm import tqdm
 from sklearn.model_selection import train_test_split
+import math
 
 # Import constants from config
-from config import DATASET_BASE_PATH, DOUBLES_COURT_WIDTH_M, HALF_COURT_LENGTH_M
+from config import (DATASET_BASE_PATH, DOUBLES_COURT_WIDTH_M, HALF_COURT_LENGTH_M,
+                    JOINT_DATASET_CONTEXT_FRAMES) # Import new const
 
 # --- Metadata Loading ---
 def load_metadata(csv_path, dataset_base_path):
@@ -42,9 +44,9 @@ def load_metadata(csv_path, dataset_base_path):
     return df
 
 
-# --- Frame Weight Assignment (CNN1 Target) ---
-def assign_weights(group, total_frames_window, decay_rate):
-    """Assigns weights based on proximity to the middle hit frame."""
+# --- Renamed Linear Weighting ---
+def assign_linear_weights(group, total_frames_window, decay_rate):
+    """Assigns weights based on proximity to the middle hit frame (LINEAR DECAY)."""
     group = group.copy()
     group['weight'] = 0.0
     hit_frames = group[group['is_hit_frame'] == 1]
@@ -52,16 +54,14 @@ def assign_weights(group, total_frames_window, decay_rate):
 
     middle_hit_idx = len(hit_frames) // 2
     middle_hit_row = hit_frames.iloc[middle_hit_idx]
-    middle_hit_frame_index_in_group = middle_hit_row.name # Original DF index
+    middle_hit_frame_index_in_group = middle_hit_row.name
 
-    # Extract frame number robustly
     middle_frame_num = None
     try:
         match = re.search(r'frame_(\d+)', os.path.basename(middle_hit_row['frame_path']))
         if match: middle_frame_num = int(match.group(1))
     except Exception: pass
-
-    if middle_frame_num is None: # Fallback to relative index if parsing fails
+    if middle_frame_num is None:
         middle_frame_num = group.index.get_loc(middle_hit_frame_index_in_group)
 
     window_half = total_frames_window // 2
@@ -75,10 +75,10 @@ def assign_weights(group, total_frames_window, decay_rate):
         if current_frame_num is None: current_frame_num = group.index.get_loc(idx)
 
         distance = abs(current_frame_num - middle_frame_num)
-        if idx == middle_hit_frame_index_in_group:
+        if idx == middle_hit_frame_index_in_group: # True hit frame
             weight = 1.0
-        elif distance <= window_half:
-            weight = max(0.0, 1.0 - (distance * decay_rate))
+        elif distance <= window_half: # Linear decay for neighbors
+            weight = max(0.0, 1.0 - (distance * decay_rate)) # Original linear logic
         else:
             weight = 0.0
         weights[idx] = weight
@@ -86,24 +86,127 @@ def assign_weights(group, total_frames_window, decay_rate):
     group['weight'] = group.index.map(weights)
     return group
 
-def apply_weighting_to_df(input_df, n_frames_weighting, weight_decay):
-    """Applies weight assignment to the entire DataFrame."""
-    print(f"Applying weight assignment (Window: {n_frames_weighting}, Decay: {weight_decay})...")
+def apply_linear_weighting_to_df(input_df, n_frames_weighting, weight_decay):
+    """Applies LINEAR weight assignment to the entire DataFrame."""
+    print(f"Applying LINEAR weight assignment (Window: {n_frames_weighting}, Decay: {weight_decay})...")
     if 'video_id' not in input_df.columns:
          raise ValueError("Missing 'video_id' column for weighting.")
 
     df_weighted = input_df.copy()
-    df_weighted['weight'] = 0.0 # Initialize
+    df_weighted['weight'] = 0.0
 
-    # Using progress_apply for visual feedback with tqdm
-    tqdm.pandas(desc="Assigning Weights")
+    tqdm.pandas(desc="Assigning Linear Weights")
     df_weighted = df_weighted.groupby('video_id', group_keys=False).progress_apply(
-        lambda grp: assign_weights(grp, total_frames_window=n_frames_weighting, decay_rate=weight_decay)
+        lambda grp: assign_linear_weights(grp, total_frames_window=n_frames_weighting, decay_rate=weight_decay)
     )
-    df_weighted = df_weighted.reset_index(drop=True) # Drop old index after apply
+    df_weighted = df_weighted.reset_index(drop=True)
+    print("Linear weight assignment complete.")
+    return df_weighted
 
-    print("Weight assignment complete.")
-    print(f"Total frames with weight > 0: {len(df_weighted[df_weighted['weight'] > 0])}")
+# --- Updated Bayesian Weighting Function h(x) ---
+def calculate_h_weight(distance, R1, R2, N, D, M1, M2):
+    """
+    Calculates weight based on the parameterized function h(x) including exp term.
+    R1 affects frames AFTER hit (dist > 0), R2 affects frames BEFORE (dist < 0).
+    """
+    # Frame 0 distance (true hit) should have weight 1.0
+    if distance == 0:
+        return 1.0
+
+    # Basic validation of params
+    if N <= 0 or D <= 0 or R1 <= 0 or R2 <= 0 or M1 < 0 or M2 < 0:
+        # print("Warn: Invalid h(x) params", R1, R2, N, D, M1, M2) # Debug
+        return 0.0
+
+    try:
+        S_val = 1.0 / (N + D)
+        K_val = D * (N + D) / N
+
+        abs_distance = abs(distance)
+
+        if distance > 0: # Frame is AFTER hit
+            scale = N / R1
+            m_val = M1
+        else: # Frame is BEFORE hit
+            scale = N / R2
+            m_val = M2
+
+        # Term 1: Inverse scaled distance part
+        term1_denom = (abs_distance * scale) + D + 1e-9 # Epsilon for safety
+        term1 = 1.0 / term1_denom
+
+        # Term 2: Exponential part
+        exp_argument = abs_distance * scale * m_val # Based on formula structure
+        # Clamp exponent argument to prevent overflow/instability
+        max_exp_arg = 20.0 # Heuristic limit, adjust if needed
+        exp_argument_clipped = min(exp_argument, max_exp_arg)
+        term2 = math.exp(exp_argument_clipped)
+        # If exp_argument was clipped, maybe print a warning during debug?
+        # if exp_argument > max_exp_arg: print(f"Warn: Clipped exp arg from {exp_argument} for dist {distance}")
+
+        # Calculate h(x) value
+        h_val = K_val * (term1 - S_val) * term2
+
+        # Clip final weight between 0 and 1
+        weight = max(0.0, h_val)
+        weight = min(weight, 1.0)
+
+        return weight
+
+    except Exception as e:
+        # print(f"Warning: Error calculating h_weight for dist {distance}: {e}") # Debug
+        return 0.0
+
+def assign_bayesian_weights(group, R1, R2, N, D, M1, M2):
+    """Assigns weights based on the h(x) function including M1, M2 for Bayesian Opt."""
+    group = group.copy()
+    group['weight'] = 0.0
+    hit_frames = group[group['is_hit_frame'] == 1]
+    if hit_frames.empty: return group
+
+    middle_hit_idx = len(hit_frames) // 2
+    middle_hit_row = hit_frames.iloc[middle_hit_idx]
+    middle_hit_frame_index_in_group = middle_hit_row.name
+
+    true_hit_frame_num = None
+    try:
+        match = re.search(r'frame_(\d+)', os.path.basename(middle_hit_row['frame_path']))
+        if match: true_hit_frame_num = int(match.group(1))
+    except Exception: pass
+    if true_hit_frame_num is None:
+        true_hit_frame_num = group.index.get_loc(middle_hit_frame_index_in_group)
+
+    weights = {}
+    for idx, row in group.iterrows():
+        current_frame_num = None
+        try:
+            match = re.search(r'frame_(\d+)', os.path.basename(row['frame_path']))
+            if match: current_frame_num = int(match.group(1))
+        except Exception: pass
+        if current_frame_num is None: current_frame_num = group.index.get_loc(idx)
+
+        distance = current_frame_num - true_hit_frame_num
+        # Calculate weight using the full h(x) function
+        weight = calculate_h_weight(distance, R1, R2, N, D, M1, M2)
+        weights[idx] = weight
+
+    group['weight'] = group.index.map(weights)
+    return group
+
+def apply_bayesian_weighting_to_df(input_df, R1, R2, N, D, M1, M2):
+    """Applies Bayesian weight assignment (with M1, M2) to the entire DataFrame."""
+    print(f"Applying Bayesian weighting (R1={R1}, R2={R2}, N={N:.3f}, D={D:.3f}, M1={M1:.3f}, M2={M2:.3f})...")
+    # ... (rest of the function is the same as before, just calls assign_bayesian_weights) ...
+    if 'video_id' not in input_df.columns: raise ValueError("Missing 'video_id'")
+    df_weighted = input_df.copy(); df_weighted['weight'] = 0.0
+    tqdm.pandas(desc="Assigning Bayesian Weights")
+    df_weighted = df_weighted.groupby('video_id', group_keys=False).progress_apply(
+        lambda grp: assign_bayesian_weights(grp, R1=R1, R2=R2, N=N, D=D, M1=M1, M2=M2)
+    )
+    df_weighted = df_weighted.reset_index(drop=True)
+    print("Bayesian weight assignment complete.")
+    print(f"Frames with weight > 0: {len(df_weighted[df_weighted['weight'] > 0])}")
+    # print(f"Weight distribution:\n{df_weighted['weight'].value_counts(bins=10, sort=False)}") # Debug
     return df_weighted
 
 
@@ -372,3 +475,88 @@ def split_sequences(all_sequences, test_size=0.15, val_size=0.15, random_state=4
     print(f"\nSequence Splitting Results:")
     print(f"  Training: {len(train_seq)}, Validation: {len(val_seq)}, Test: {len(test_seq)}")
     return train_seq, val_seq, test_seq
+
+
+# --- NEW: Prepare Data for JointPredictionDataset ---
+def get_long_context_sequences(input_df, landing_df_indexed, target_weights_df, context_len=JOINT_DATASET_CONTEXT_FRAMES):
+    """
+    Creates LONG sequences centered on TRUE hit frame. Includes target weights.
+    """
+    print(f"\nPreparing {context_len}-frame LONG context sequences for Joint Training...")
+    if input_df.empty or landing_df_indexed.empty or target_weights_df.empty:
+        print("Error: Input DataFrames for long sequence generation are empty.")
+        return []
+    if context_len % 2 == 0:
+        print(f"Warning: JOINT_DATASET_CONTEXT_FRAMES ({context_len}) should be odd. Adjusting.")
+        context_len += 1
+
+    # Ensure target_weights_df has frame_path as index for quick lookup
+    if 'frame_path' not in target_weights_df.columns:
+         raise ValueError("target_weights_df must have 'frame_path' column")
+    target_weights_map = target_weights_df.set_index('frame_path')['weight'].to_dict()
+
+    long_sequences = []
+    # Group by video_id using the original DataFrame (input_df)
+    video_groups = input_df.groupby('video_id')
+    skipped_no_true_hit, skipped_no_landing, skipped_parse, skipped_weight = 0, 0, 0, 0
+
+    group_iterator = tqdm(video_groups, desc="Processing Videos for Long Seq", total=len(video_groups), ncols=80)
+    for video_id, group in group_iterator:
+        group = group.copy()
+        shot_id = os.path.basename(video_id)
+
+        try: # Find TRUE hit frame and sort group
+            true_hit_frames = group[group['is_hit_frame'] == 1]
+            if true_hit_frames.empty: skipped_no_true_hit += 1; continue
+            true_hit_row = true_hit_frames.iloc[len(true_hit_frames) // 2]
+
+            group['frame_num_int'] = group['frame_path'].apply(
+                lambda x: int(re.search(r'frame_(\d+)', os.path.basename(x)).group(1))
+            )
+            group_sorted = group.sort_values('frame_num_int')
+            sorted_paths = group_sorted['frame_path'].tolist()
+            num_total = len(sorted_paths)
+            true_hit_idx_sorted = sorted_paths.index(true_hit_row['frame_path'])
+        except Exception as e: skipped_parse += 1; continue
+
+        # Link to landing data
+        if shot_id not in landing_df_indexed.index: skipped_no_landing += 1; continue
+        target_coords = tuple(landing_df_indexed.loc[shot_id, ['NormX', 'NormY']].values)
+
+        # Extract LONG sequence centered around the TRUE hit frame
+        half_window = context_len // 2
+        start_idx = true_hit_idx_sorted - half_window
+        end_idx = true_hit_idx_sorted + half_window
+        seq_paths = [sorted_paths[np.clip(i, 0, num_total - 1)] for i in range(start_idx, end_idx + 1)]
+
+        # Get target weights for this sequence using the precomputed map
+        seq_weights = []
+        valid_weights = True
+        for p in seq_paths:
+             w = target_weights_map.get(p, None)
+             if w is None:
+                  # print(f"Warn: Weight not found for {p}") # Debug
+                  skipped_weight += 1
+                  valid_weights = False
+                  break # Skip this whole sequence if any weight is missing
+             seq_weights.append(w)
+        if not valid_weights: continue
+
+        # Calculate the index of the true hit frame within this extracted sequence
+        true_hit_idx_in_sequence = np.clip(true_hit_idx_sorted - start_idx, 0, context_len - 1)
+
+        if len(seq_paths) == context_len and len(seq_weights) == context_len:
+            long_sequences.append({
+                'sequence_paths': seq_paths,
+                'target_coords': target_coords,
+                'target_weights': seq_weights, # Add target weights for CNN1 loss
+                'true_hit_index_in_sequence': true_hit_idx_in_sequence,
+                'video_id': video_id,
+                'shot_id': shot_id
+            })
+
+    print(f"\nLong Sequence Creation Summary:")
+    print(f"  Success: {len(long_sequences)}, Skipped (No True Hit): {skipped_no_true_hit}, "
+          f"Skipped (No Landing): {skipped_no_landing}, Skipped (Parse): {skipped_parse}, "
+          f"Skipped (Weight Lookup): {skipped_weight}")
+    return long_sequences

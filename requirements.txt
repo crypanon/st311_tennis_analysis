@@ -8,3 +8,4 @@ matplotlib
 tqdm
 kagglehub # Optional, for automatic download
 Pillow # PIL fork, often installed with torch/torchvision
+optuna
