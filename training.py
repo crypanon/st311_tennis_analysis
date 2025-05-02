@@ -7,6 +7,7 @@ import time
 import os
 import pandas as pd
 from tqdm import tqdm # Use standard tqdm
+import math
 
 def train_model(model, model_name, train_loader, val_loader, criterion, optimizer, device, epochs,
                 early_stopping_patience=10, min_improvement=1e-5,
@@ -339,26 +340,49 @@ def train_joint_model(cnn1_model, cnn2_model, model_name,
         # --- Validation Phase (Evaluate CNN2 on standard BallLandingDataset) ---
         # ... (Validation logic remains the same as before, using cnn2_model.eval()) ...
         # ... It appends to history['val_loss_cnn2'] and history['val_mae_cnn2'] ...
-        # --- Validation Phase ---
-        cnn1_model.eval(); cnn2_model.eval() # Set both to eval
-        running_val_loss_c2 = 0.0
-        running_val_mae_c2 = 0.0
-        val_loop = tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Joint Val CNN2]", leave=False, ncols=100)
-        with torch.no_grad():
-            for inputs_cnn2_val, targets_coords_val in val_loop: # Uses BallLandingDataset loader
-                inputs_cnn2_val = inputs_cnn2_val.to(device, non_blocking=non_blocking)
-                targets_coords_val = targets_coords_val.to(device, non_blocking=non_blocking).view(-1, 2).float()
-                outputs_coords_val = cnn2_model(inputs_cnn2_val)
-                loss_c2_val = criterion_cnn2(outputs_coords_val, targets_coords_val)
-                running_val_loss_c2 += loss_c2_val.item()
-                mae_c2_val = torch.abs(outputs_coords_val - targets_coords_val).mean()
-                running_val_mae_c2 += mae_c2_val.item()
-                val_loop.set_postfix(loss=f"{loss_c2_val.item():.5f}", mae=f"{mae_c2_val.item():.4f}")
-        epoch_val_loss_c2 = running_val_loss_c2 / len(val_loader) if len(val_loader) > 0 else float('inf')
-        epoch_val_mae_c2 = running_val_mae_c2 / len(val_loader) if len(val_loader) > 0 else float('inf')
-        history['val_loss_cnn2'].append(epoch_val_loss_c2)
-        history['val_mae_cnn2'].append(epoch_val_mae_c2)
-        val_loop.close()
+        # --- Validation Phase (Optional) ---
+        epoch_val_loss_c2 = float('nan') # Default if skipped
+        epoch_val_mae_c2 = float('nan')
+        # training.py - train_joint_model (Validation part)
+        if val_loader: # Check if validation should run
+            cnn1_model.eval(); cnn2_model.eval()
+            running_val_loss_c2 = 0.0
+            running_val_mae_c2 = 0.0
+            val_loop = tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Joint Val CNN2]", leave=False, ncols=100)
+            with torch.no_grad():
+                try:
+                    # val_loader now yields data from BallLandingDataset with cnn2_seq_len_dynamic frames
+                    for inputs_cnn2_val, targets_coords_val in val_loop:
+                        inputs_cnn2_val = inputs_cnn2_val.to(device, non_blocking=non_blocking) # Shape [B, C*DynamicSeqLen, H, W]
+                        targets_coords_val = targets_coords_val.to(device, non_blocking=non_blocking).view(-1, 2).float()
+
+                        # This should now match model's expected input channels
+                        outputs_coords_val = cnn2_model(inputs_cnn2_val)
+
+                        loss_c2_val = criterion_cnn2(outputs_coords_val, targets_coords_val)
+                        running_val_loss_c2 += loss_c2_val.item()
+                        mae_c2_val = torch.abs(outputs_coords_val - targets_coords_val).mean()
+                        running_val_mae_c2 += mae_c2_val.item()
+                        val_loop.set_postfix(loss=f"{loss_c2_val.item():.5f}", mae=f"{mae_c2_val.item():.4f}")
+
+                except Exception as e: # Catch unexpected errors
+                    print(f"\n!!! UNEXPECTED VALIDATION ERROR: {e} !!!")
+                    running_val_loss_c2 = float('inf')
+                    running_val_mae_c2 = float('inf')
+
+            # Calculate metrics
+            if len(val_loader) > 0 and math.isfinite(running_val_loss_c2):
+                epoch_val_loss_c2 = running_val_loss_c2 / len(val_loader)
+                epoch_val_mae_c2 = running_val_mae_c2 / len(val_loader)
+            else:
+                epoch_val_loss_c2 = float('inf')
+                epoch_val_mae_c2 = float('inf')
+
+            history['val_loss_cnn2'].append(epoch_val_loss_c2)
+            history['val_mae_cnn2'].append(epoch_val_mae_c2)
+            if 'val_loop' in locals(): val_loop.close()
+    
+        # --- End Optional Validation ---
         epoch_duration = time.time() - epoch_start_time
 
         # --- Log Epoch Results (more detailed) ---

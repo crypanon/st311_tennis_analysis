@@ -106,10 +106,10 @@ def main(args):
 
 
     # --- 4. Optional Searches (Grid for Arch/HP, BayesOpt for Weighting) ---
-    final_cnn1_splits = None # Uses linear weights if only standard training
+    final_cnn1_splits = None # Uses linear weights for standard training
     final_cnn2_splits = None # Standard CNN2 splits
     final_joint_splits = None # Splits for JointPredictionDataset
-    cnn1_balanced_df_final = None # To store balanced DF corresponding to best weights
+    # cnn1_balanced_df_final = None # To store balanced DF corresponding to best weights (not strictly needed later)
     landing_df_indexed = None # To store loaded landing data
     df_processed_linear = None # Store DF with linear weights if created
 
@@ -320,7 +320,7 @@ def main(args):
     # Declare loaders here to handle scope if only eval/pred is run
     cnn1_train_loader, cnn1_val_loader, cnn1_test_loader = None, None, None
     cnn2_train_loader, cnn2_val_loader, cnn2_test_loader = None, None, None
-    joint_train_loader, joint_val_loader, joint_test_loader = None, None, None
+    joint_train_loader, joint_val_loader, joint_test_loader = None, None, None # Separate joint val loader
 
     if args.run_final_training or args.run_joint_training or args.run_evaluation:
         if df_full is None: print("ERROR: df_full needed for data preparation."); return
@@ -348,20 +348,44 @@ def main(args):
             # Use the standard ODD sequence length from CNN2 DP params
             cnn2_seq_len_std = cnn2_dataprep_params.get('n_frames_sequence_cnn2', config.DEFAULT_N_FRAMES_SEQUENCE_CNN2)
             if cnn2_seq_len_std % 2 == 0: cnn2_seq_len_std += 1 # Ensure odd
-            val_test_cnn2_seq_len = cnn2_seq_len_std
-            print(f"Preparing Standard CNN2 sequences using length: {val_test_cnn2_seq_len}")
+            # Determine the length needed for the standard Val/Test loaders
+            # If joint training is running, these need the dynamic length; otherwise, use standard length
+            cnn2_seq_len_dynamic = None
+            if config.OPTIMIZED_R1_INT is not None and config.OPTIMIZED_R2_INT is not None:
+                cnn2_seq_len_dynamic = config.OPTIMIZED_R1_INT + config.OPTIMIZED_R2_INT + 1
+            else: # Fallback if R1/R2 not available
+                 cnn2_seq_len_dynamic = cnn2_seq_len_std
 
-            final_sequences_cnn2 = get_sequences_for_cnn2(
+            # This length will be used for the val/test loaders consistently
+            val_test_cnn2_seq_len = cnn2_seq_len_dynamic if args.run_joint_training else cnn2_seq_len_std
+            print(f"Preparing Standard CNN2 sequences for Val/Test using length: {val_test_cnn2_seq_len}")
+
+            # Create sequences using this length - needed for val/test sets
+            final_sequences_cnn2_val_test = get_sequences_for_cnn2(
                 cnn1_balanced_df_linear, landing_df_indexed, val_test_cnn2_seq_len
             )
-            if not final_sequences_cnn2: raise ValueError("No std CNN2 sequences.")
-            f_train_seq2, f_val_seq2, f_test_seq2 = split_sequences(final_sequences_cnn2)
-            # Store the actual splits used
+            if not final_sequences_cnn2_val_test: raise ValueError("No std CNN2 sequences for val/test.")
+            # We need to split the *entire* set prepared with this length
+            _, f_val_seq2, f_test_seq2 = split_sequences(final_sequences_cnn2_val_test) # Only need val/test splits here
+
+            # If standard training is run, we also need a training split using standard length
+            f_train_seq2 = None
+            if args.run_final_training:
+                 print(f"Preparing Standard CNN2 sequences for Train using length: {cnn2_seq_len_std}")
+                 final_sequences_cnn2_train = get_sequences_for_cnn2(
+                      cnn1_balanced_df_linear, landing_df_indexed, cnn2_seq_len_std
+                 )
+                 if not final_sequences_cnn2_train: raise ValueError("No std CNN2 sequences for train.")
+                 f_train_seq2, _, _ = split_sequences(final_sequences_cnn2_train) # Only need train split here
+
+            # Store the necessary splits (train split might be None)
             final_cnn2_splits = (f_train_seq2, f_val_seq2, f_test_seq2)
-            if not f_train_seq2 or not f_val_seq2 or not f_test_seq2: raise ValueError("Std CNN2 split failed.")
+            if (args.run_final_training and not f_train_seq2) or not f_val_seq2 or not f_test_seq2:
+                 raise ValueError("Std CNN2 split failed.")
+
         except Exception as e: print(f"ERROR prep standard CNN2: {e}"); return
 
-        # Prepare JOINT sequences/splits using BEST Bayesian h(x) weights (only if needed)
+        # Prepare JOINT sequences/splits (only if needed)
         if args.run_joint_training:
             if cnn1_weighting_params is None: print("ERR: Bayes weights needed for joint prep."); return
             try:
@@ -375,16 +399,17 @@ def main(args):
                     context_len=config.JOINT_DATASET_CONTEXT_FRAMES
                 )
                 if not final_sequences_joint: raise ValueError("No Joint sequences.")
-                f_train_seqJ, f_val_seqJ_joint, f_test_seqJ_joint = split_sequences(final_sequences_joint) # Split joint format data
-                # Val/Test for joint training will use standard CNN2 val/test sequences/loaders
-                f_val_seqJ = final_cnn2_splits[1] # Use standard val set
-                f_test_seqJ = final_cnn2_splits[2] # Use standard test set
+                # Split joint format data, we only need train part
+                f_train_seqJ, _, _ = split_sequences(final_sequences_joint)
+                # Val/Test for joint training will use standard CNN2 val/test sequences prepared above
+                f_val_seqJ = final_cnn2_splits[1] # Use standard val set (f_val_seq2)
+                f_test_seqJ = final_cnn2_splits[2] # Use standard test set (f_test_seq2)
                 final_joint_splits = (f_train_seqJ, f_val_seqJ, f_test_seqJ)
                 if not f_train_seqJ: raise ValueError("Joint train split failed.")
             except Exception as e: print(f"ERROR prep joint data: {e}"); return
 
 
-        # Create Final DataLoaders
+        # --- Create Final DataLoaders ---
         print("\nCreating final DataLoaders...")
         # Standard CNN1 Loaders
         if f_train_p1: cnn1_train_loader = DataLoader(TennisFrameDataset(f_train_p1, f_train_t1, augment=True), batch_size=cnn1_trainhp_params['batch_size'], shuffle=True, num_workers=config.NUM_WORKERS, pin_memory=config.PIN_MEMORY, drop_last=True)
@@ -392,19 +417,23 @@ def main(args):
         if f_test_p1: cnn1_test_loader = DataLoader(TennisFrameDataset(f_test_p1, f_test_t1, augment=False), batch_size=cnn1_trainhp_params['batch_size'], shuffle=False, num_workers=config.NUM_WORKERS, pin_memory=config.PIN_MEMORY)
         print(f"Std CNN1 Loaders: Tr={len(cnn1_train_loader or [])}, Vl={len(cnn1_val_loader or [])}, Ts={len(cnn1_test_loader or [])}")
 
-        # Standard CNN2 Loaders (use val_test_cnn2_seq_len determined earlier)
-        if f_train_seq2: cnn2_train_loader = DataLoader(BallLandingDataset(f_train_seq2, n_frames_sequence=val_test_cnn2_seq_len, augment=True), batch_size=cnn2_trainhp_params['batch_size'], shuffle=True, num_workers=config.NUM_WORKERS, pin_memory=config.PIN_MEMORY, drop_last=True)
-        if f_val_seq2: cnn2_val_loader = DataLoader(BallLandingDataset(f_val_seq2, n_frames_sequence=val_test_cnn2_seq_len, augment=False), batch_size=cnn2_trainhp_params['batch_size'], shuffle=False, num_workers=config.NUM_WORKERS, pin_memory=config.PIN_MEMORY)
-        if f_test_seq2: cnn2_test_loader = DataLoader(BallLandingDataset(f_test_seq2, n_frames_sequence=val_test_cnn2_seq_len, augment=False), batch_size=cnn2_trainhp_params['batch_size'], shuffle=False, num_workers=config.NUM_WORKERS, pin_memory=config.PIN_MEMORY)
-        print(f"Std CNN2 Loaders (using {val_test_cnn2_seq_len} frames): Tr={len(cnn2_train_loader or [])}, Vl={len(cnn2_val_loader or [])}, Ts={len(cnn2_test_loader or [])}")
+        # Standard CNN2 Loaders (use specific lengths)
+        if final_cnn2_splits:
+            f_train_seq2, f_val_seq2, f_test_seq2 = final_cnn2_splits
+            # Std train loader uses standard odd length
+            if args.run_final_training and f_train_seq2: cnn2_train_loader = DataLoader(BallLandingDataset(f_train_seq2, n_frames_sequence=cnn2_seq_len_std, augment=True), batch_size=cnn2_trainhp_params['batch_size'], shuffle=True, num_workers=config.NUM_WORKERS, pin_memory=config.PIN_MEMORY, drop_last=True)
+            # Val/Test loaders use val_test_cnn2_seq_len (which might be dynamic if joint training)
+            if f_val_seq2: cnn2_val_loader = DataLoader(BallLandingDataset(f_val_seq2, n_frames_sequence=val_test_cnn2_seq_len, augment=False), batch_size=cnn2_trainhp_params['batch_size'], shuffle=False, num_workers=config.NUM_WORKERS, pin_memory=config.PIN_MEMORY)
+            if f_test_seq2: cnn2_test_loader = DataLoader(BallLandingDataset(f_test_seq2, n_frames_sequence=val_test_cnn2_seq_len, augment=False), batch_size=cnn2_trainhp_params['batch_size'], shuffle=False, num_workers=config.NUM_WORKERS, pin_memory=config.PIN_MEMORY)
+            print(f"Std CNN2 Loaders: Tr={len(cnn2_train_loader or [])} (len={cnn2_seq_len_std}), Vl={len(cnn2_val_loader or [])} (len={val_test_cnn2_seq_len}), Ts={len(cnn2_test_loader or [])} (len={val_test_cnn2_seq_len})")
 
         # Joint Training Loaders
         if args.run_joint_training and final_joint_splits:
              f_train_seqJ = final_joint_splits[0]
              joint_train_loader = DataLoader(JointPredictionDataset(f_train_seqJ, n_frames_context=config.JOINT_DATASET_CONTEXT_FRAMES, augment=True), batch_size=config.DEFAULT_JOINT_BATCH_SIZE, shuffle=True, num_workers=config.NUM_WORKERS, pin_memory=config.PIN_MEMORY, drop_last=True)
-             # *** Use the correctly sized cnn2_val_loader for joint validation ***
-             joint_val_loader = cnn2_val_loader # Reuse standard CNN2 val loader
-             joint_test_loader = cnn2_test_loader # Use std test loader for consistency
+             # Assign the (now correctly sized) cnn2_val_loader for joint validation
+             joint_val_loader = cnn2_val_loader
+             joint_test_loader = cnn2_test_loader # Use std test loader
              print(f"Joint Loaders: Tr={len(joint_train_loader or [])}, Vl={len(joint_val_loader or [])}, Ts={len(joint_test_loader or [])}")
 
 
@@ -414,6 +443,7 @@ def main(args):
          if cnn1_train_loader is None or cnn1_val_loader is None: print("ERR: Std CNN1 loaders needed."); return
          # --- Train Standard CNN1 ---
          print("\n--- Final Training: Standard CNN1 ---")
+         # Ensure arch params are loaded and create correct init dict
          if 'filters' not in cnn1_arch_params: print("ERR: CNN1 arch filters missing."); return
          cnn1_init_params_std = {
              'block_filters': tuple(cnn1_arch_params['filters']),
@@ -430,9 +460,9 @@ def main(args):
          if cnn2_train_loader is None or cnn2_val_loader is None: print("ERR: Std CNN2 loaders needed."); return
          # --- Train Standard CNN2 ---
          print("\n--- Final Training: Standard CNN2 ---")
-         # Use standard seq len for input channels
+         # Use standard ODD seq len for input channels
          cnn2_seq_len_std_train = cnn2_dataprep_params.get('n_frames_sequence_cnn2', config.DEFAULT_N_FRAMES_SEQUENCE_CNN2)
-         if cnn2_seq_len_std_train % 2 == 0: cnn2_seq_len_std_train += 1 # Ensure odd
+         if cnn2_seq_len_std_train % 2 == 0: cnn2_seq_len_std_train += 1
          cnn2_input_channels_std = cnn2_seq_len_std_train * 3
          # Use loaded/default CNN2 arch params
          if 'conv_filters' not in cnn2_arch_params: print("ERR: CNN2 arch conv_filters missing."); return
@@ -447,16 +477,24 @@ def main(args):
          criterion2 = nn.MSELoss(); optimizer2 = optim.Adam(cnn2_model_std.parameters(), lr=cnn2_trainhp_params['learning_rate'])
          model2_path = os.path.join(config.PROJECT_OUTPUT_PATH, 'cnn2_landing_spot_predictor_final.pth')
          history2_path = os.path.join(config.PROJECT_OUTPUT_PATH, 'cnn2_final_training_history.csv')
+         # Use standard cnn2_train_loader and cnn2_val_loader
          train_model(model=cnn2_model_std, model_name="CNN2 Final", train_loader=cnn2_train_loader, val_loader=cnn2_val_loader, criterion=criterion2, optimizer=optimizer2, device=config.DEVICE, epochs=config.DEFAULT_FINAL_EPOCHS, early_stopping_patience=config.DEFAULT_EARLY_STOPPING_PATIENCE, min_improvement=config.DEFAULT_MIN_IMPROVEMENT, results_save_path=history2_path, best_model_save_path=model2_path)
          del cnn2_model_std, optimizer2, criterion2; gc.collect(); torch.cuda.empty_cache()
          print("\n" + "#"*20 + " Standard Final Training Finished " + "#"*20)
 
 
     if args.run_joint_training:
-         if joint_train_loader is None or joint_val_loader is None or config.OPTIMIZED_R1_INT is None or config.OPTIMIZED_R2_INT is None:
-              print("ERROR: Cannot run joint training without joint data loaders & optimized R1/R2.")
+         if joint_train_loader is None or config.OPTIMIZED_R1_INT is None or config.OPTIMIZED_R2_INT is None:
+              print("ERROR: Cannot run joint training without train loader & optimized R1/R2.")
               return
-         print("\n" + "#"*20 + " Starting Joint Final Training (Validation May Be Skipped/Inaccurate) " + "#"*20)
+         # Determine if validation loader is available
+         if joint_val_loader is None:
+              print("WARN: Proceeding with joint training without validation.")
+              early_stopping_patience_joint = 0 # Disable ES
+         else:
+              early_stopping_patience_joint = config.DEFAULT_EARLY_STOPPING_PATIENCE
+
+         print("\n" + "#"*20 + " Starting Joint Final Training " + "#"*20)
          # Instantiate models (use best ARCH for CNN1)
          if 'filters' not in cnn1_arch_params: print("ERR: CNN1 arch filters missing."); return
          cnn1_init_params = {
@@ -488,24 +526,21 @@ def main(args):
          model2_joint_path = os.path.join(config.PROJECT_OUTPUT_PATH, 'cnn2_landing_spot_predictor_joint.pth')
          history_joint_path = os.path.join(config.PROJECT_OUTPUT_PATH, 'joint_final_training_history.csv')
 
-         # Set val_loader to None to disable validation within the loop for now
-         # due to channel mismatch issues unless resolved.
-         print("INFO: Disabling validation loop within train_joint_model due to potential channel mismatch.")
+         # Pass the correctly sized joint_val_loader (can be None)
          train_joint_model(
              cnn1_model=cnn1_model_joint, cnn2_model=cnn2_model_joint, model_name="Joint Final",
              train_loader=joint_train_loader,
-             val_loader=None, # Pass None to skip validation loop
+             val_loader=joint_val_loader, # Pass the potentially None val loader
              optimizer=optimizer_joint, device=config.DEVICE, epochs=config.DEFAULT_FINAL_EPOCHS,
              penalty_weight=config.DEFAULT_JOINT_TRAINING_PENALTY_WEIGHT,
              R1=config.OPTIMIZED_R1_INT, R2=config.OPTIMIZED_R2_INT, # Pass optimized integers
-             early_stopping_patience=0, # Disable ES if no validation
+             early_stopping_patience=early_stopping_patience_joint, # Use potentially modified patience
              min_improvement=config.DEFAULT_MIN_IMPROVEMENT,
              results_save_path=history_joint_path,
              best_model_save_path_cnn1=model1_joint_path, best_model_save_path_cnn2=model2_joint_path
          )
          del cnn1_model_joint, cnn2_model_joint, optimizer_joint; gc.collect(); torch.cuda.empty_cache()
          print("\n" + "#"*20 + " Joint Training Finished " + "#"*20)
-
 
     # --- 7. Evaluation ---
     if args.run_evaluation:
@@ -619,7 +654,10 @@ def main(args):
              cnn2_pred_model = None # Reset
              if os.path.exists(model2_pred_path):
                  try:
-                      cnn2_pred_model_instance.load_state_dict(torch.load(model2_pred_path, map_location=config.DEVICE))
+                      # Use the utility function which just loads state dict now
+                      # We need to ensure load_final_cnn2_model can handle this or load directly
+                      state_dict = torch.load(model2_pred_path, map_location=config.DEVICE)
+                      cnn2_pred_model_instance.load_state_dict(state_dict)
                       cnn2_pred_model_instance.eval()
                       print(f"Loaded prediction CNN2 weights from {os.path.basename(model2_pred_path)}")
                       cnn2_pred_model = cnn2_pred_model_instance # Use the loaded instance
