@@ -17,7 +17,7 @@ os.makedirs(PROJECT_OUTPUT_PATH, exist_ok=True)
 # This will be set by main.py after attempting the download.
 # If download fails, manually set this path to your dataset location.
 # Example: DATASET_BASE_PATH = '/path/to/your/downloaded/st311-tennis/'
-DATASET_BASE_PATH = "C:/Users/josep/.cache/kagglehub/datasets/joekinder/st311-tennis/versions/1/"
+DATASET_BASE_PATH = "None"
 
 # --- Core Parameters ---
 IMG_HEIGHT, IMG_WIDTH = 224, 224 # Input image dimensions
