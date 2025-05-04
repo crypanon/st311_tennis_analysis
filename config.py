@@ -113,10 +113,19 @@ BAYESIAN_PARAM_RANGES = {
 # Store the best found Bayesian params globally after optimization
 BEST_BAYESIAN_PARAMS = None
 
-# --- Joint Training Control ---
 DEFAULT_JOINT_LR = 1e-5
 DEFAULT_JOINT_BATCH_SIZE = 4
-DEFAULT_JOINT_TRAINING_PENALTY_WEIGHT = 0.1
+# Base weight for the CNN1 hit index penalty (used in adaptive calculation)
+DEFAULT_JOINT_TRAINING_PENALTY_WEIGHT = 0.1 # This now acts as a base scaling factor
+# Enable/Disable adaptive penalty
+ADAPTIVE_PENALTY_ENABLED = True
+# Smoothing factor (beta) for Exponential Moving Average (EMA) of losses (higher means smoother)
+ADAPTIVE_PENALTY_BETA = 0.99
+# Small epsilon to prevent division by zero when penalty loss is near zero
+ADAPTIVE_PENALTY_EPSILON = 1e-6
+# Maximum allowed value for the adaptive penalty weight (to prevent explosion)
+MAX_ADAPTIVE_PENALTY_WEIGHT = 2.0 # Example upper limit, tune if needed
+
 # Fixed length for the context window in JointPredictionDataset
 JOINT_DATASET_CONTEXT_FRAMES = 21 # Must be >= max(R1+R2+1). Needs to be odd.
 

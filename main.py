@@ -532,7 +532,6 @@ def main(args):
              train_loader=joint_train_loader,
              val_loader=joint_val_loader, # Pass the potentially None val loader
              optimizer=optimizer_joint, device=config.DEVICE, epochs=config.DEFAULT_FINAL_EPOCHS,
-             penalty_weight=config.DEFAULT_JOINT_TRAINING_PENALTY_WEIGHT,
              R1=config.OPTIMIZED_R1_INT, R2=config.OPTIMIZED_R2_INT, # Pass optimized integers
              early_stopping_patience=early_stopping_patience_joint, # Use potentially modified patience
              min_improvement=config.DEFAULT_MIN_IMPROVEMENT,
