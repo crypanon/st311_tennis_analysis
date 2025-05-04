@@ -1,7 +1,7 @@
 # ST311 Tennis Analysis Project
 
 ## Overview
-This project focuses on analyzing tennis data using Convolutional Neural Networks (CNNs). It includes two primary tasks:
+This project focuses on analysing tennis data using Convolutional Neural Networks (CNNs). It includes two primary tasks:
 1. **Hit Frame Regression**: Predicting the frame where a tennis ball is hit.
 2. **Landing Spot Prediction**: Estimating the landing coordinates of the ball.
 
@@ -11,7 +11,7 @@ The project is implemented in Python using PyTorch and includes various utilitie
 - **Data Preprocessing**: Utilities to load and preprocess tennis match data, including frame sequences and landing coordinates.
 - **Model Training**: Scripts for training CNN models with support for hyperparameter tuning and early stopping.
 - **Prediction Pipeline**: Functions to predict hit frames and landing spots using trained models.
-- **Visualization**: Tools to visualize predictions and training progress.
+- **Visualisation**: Tools to visualise predictions and training progress.
 
 ## Project Structure
 - `main.py`: Entry point for running different components of the project.
